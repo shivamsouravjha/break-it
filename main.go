@@ -1,17 +1,20 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 )
 
 type CircuitBreaker struct {
-	failureThreshold int
-	recoveryTime     time.Duration
-	mutex            sync.Mutex
-	consecutiveFail  int
-	state            State
+	failureThreshold     int
+	recoveryTime         time.Duration
+	mutex                sync.Mutex
+	consecutiveFail      int
+	state                State
+	lastStateTransition  time.Time
+	lastSuccessfulInvoke time.Time
 }
 
 type State int
@@ -24,9 +27,11 @@ const (
 
 func NewCircuitBreaker(failureThreshold int, recoveryTime time.Duration) *CircuitBreaker {
 	return &CircuitBreaker{
-		failureThreshold: failureThreshold,
-		recoveryTime:     recoveryTime,
-		state:            Closed,
+		failureThreshold:     failureThreshold,
+		recoveryTime:         recoveryTime,
+		state:                Closed,
+		lastStateTransition:  time.Now(),
+		lastSuccessfulInvoke: time.Now(),
 	}
 }
 
@@ -38,45 +43,62 @@ func (cb *CircuitBreaker) Execute(function func() error) error {
 	case Closed:
 		if cb.consecutiveFail >= cb.failureThreshold {
 			cb.state = Open
-			go cb.autoReset()
-			return fmt.Errorf("Circuit Breaker is OPEN")
+			cb.lastStateTransition = time.Now()
+			return errors.New("circuit breaker is open")
 		}
 
 		err := function()
 		if err != nil {
 			cb.consecutiveFail++
-		} else {
-			cb.consecutiveFail = 0
+			return err
 		}
 
-		return err
+		cb.consecutiveFail = 0
+		cb.lastSuccessfulInvoke = time.Now()
+		return nil
 
 	case Open:
-		return fmt.Errorf("Circuit Breaker is OPEN")
-
-	case HalfOpen:
-		err := function()
-		if err != nil {
-			cb.consecutiveFail++
-			cb.state = Open
-			go cb.autoReset()
-		} else {
+		if time.Since(cb.lastStateTransition) >= cb.recoveryTime {
+			cb.state = HalfOpen
 			cb.consecutiveFail = 0
-			cb.state = Closed
+			return nil
 		}
 
-		return err
+		return errors.New("circuit breaker is open")
+
+	case HalfOpen:
+		timeout := time.After(cb.recoveryTime)
+
+		resultCh := make(chan error, 1)
+		go func() {
+			resultCh <- function()
+		}()
+
+		select {
+		case result := <-resultCh:
+			if result != nil {
+				cb.lastStateTransition = time.Now()
+				cb.state = Open
+				cb.consecutiveFail++
+				return errors.New("circuit breaker is open")
+			}
+
+			cb.lastStateTransition = time.Now()
+			cb.state = Closed
+			cb.consecutiveFail = 0
+			cb.lastSuccessfulInvoke = time.Now()
+			return nil
+
+		case <-timeout:
+			cb.lastStateTransition = time.Now()
+			cb.state = Open
+			cb.consecutiveFail++
+			return errors.New("circuit breaker is open")
+		}
 
 	default:
-		return fmt.Errorf("Invalid Circuit Breaker state")
+		return errors.New("invalid circuit breaker state")
 	}
-}
-
-func (cb *CircuitBreaker) autoReset() {
-	time.Sleep(cb.recoveryTime)
-	cb.mutex.Lock()
-	defer cb.mutex.Unlock()
-	cb.state = HalfOpen
 }
 
 func main() {
@@ -84,12 +106,8 @@ func main() {
 
 	for i := 0; i < 10; i++ {
 		err := circuitBreaker.Execute(func() error {
-			fmt.Println("Executing function...")
-			if i%3 == 0 {
-				return fmt.Errorf("Function execution failed")
-			} else {
-				return nil
-			}
+			fmt.Println("executing function...")
+			return nil
 		})
 
 		if err != nil {
