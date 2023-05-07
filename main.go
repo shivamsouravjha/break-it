@@ -60,41 +60,25 @@ func (cb *CircuitBreaker) Execute(function func() error) error {
 	case Open:
 		if time.Since(cb.lastStateTransition) >= cb.recoveryTime {
 			cb.state = HalfOpen
-			cb.consecutiveFail = 0
 			return nil
 		}
 
 		return errors.New("circuit breaker is open")
 
 	case HalfOpen:
-		timeout := time.After(cb.recoveryTime)
-
-		resultCh := make(chan error, 1)
-		go func() {
-			resultCh <- function()
-		}()
-
-		select {
-		case result := <-resultCh:
-			if result != nil {
-				cb.lastStateTransition = time.Now()
-				cb.state = Open
-				cb.consecutiveFail++
-				return errors.New("circuit breaker is open")
-			}
-
-			cb.lastStateTransition = time.Now()
-			cb.state = Closed
-			cb.consecutiveFail = 0
-			cb.lastSuccessfulInvoke = time.Now()
-			return nil
-
-		case <-timeout:
+		err := function()
+		if err != nil {
 			cb.lastStateTransition = time.Now()
 			cb.state = Open
 			cb.consecutiveFail++
 			return errors.New("circuit breaker is open")
 		}
+
+		cb.lastStateTransition = time.Now()
+		cb.state = Closed
+		cb.consecutiveFail = 0
+		cb.lastSuccessfulInvoke = time.Now()
+		return nil
 
 	default:
 		return errors.New("invalid circuit breaker state")
@@ -111,9 +95,11 @@ func main() {
 		})
 
 		if err != nil {
-			fmt.Println("Error:", err)
+			fmt.Println("error:", err)
 		} else {
-			fmt.Println("Function execution successful")
+			fmt.Println("function executed successfully")
 		}
+
+		time.Sleep(1 * time.Second)
 	}
 }
